@@ -1,0 +1,9 @@
+vosk>=0.3.42
+pyaudio>=0.2.11
+requests>=2.28.0
+wave
+flask>=2.3.0
+flask-cors>=4.0.0
+pigpio>=1.78
+numpy>=1.21.0
+scipy>=1.7.0 

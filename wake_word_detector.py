@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""
+Wake Word Detection using Vosk for Furby
+"""
+
+import json
+import os
+import time
+import threading
+import pyaudio
+from typing import Callable
+
+# Optional import
+try:
+    import vosk
+    VOSK_AVAILABLE = True
+except ImportError:
+    print("⚠️ Vosk not available - wake word detection disabled")
+    VOSK_AVAILABLE = False
+
+
+class WakeWordDetector:
+    """Wake word detection using Vosk"""
+    
+    def __init__(self, config, callback: Callable):
+        self.config = config
+        self.callback = callback
+        self.model = None
+        self.recognizer = None
+        self.is_listening = False
+        self.is_paused = False
+        self.is_available = False
+        self.last_detection = 0
+        self.wake_words = [word.strip().lower() for word in config.WAKE_WORDS]
+        
+        if VOSK_AVAILABLE:
+            self.setup_vosk()
+    
+    def setup_vosk(self):
+        """Initialize Vosk for wake word detection"""
+        if not os.path.exists(self.config.VOSK_MODEL_PATH):
+            print(f"❌ Vosk model not found: {self.config.VOSK_MODEL_PATH}")
+            return
+        
+        try:
+            self.model = vosk.Model(self.config.VOSK_MODEL_PATH)
+            self.recognizer = vosk.KaldiRecognizer(self.model, self.config.SAMPLE_RATE)
+            self.recognizer.SetWords(True)
+            self.is_available = True
+            print(f"✅ Wake word detector ready - Words: {', '.join(self.wake_words)}")
+        except Exception as e:
+            print(f"❌ Wake word detector setup failed: {e}")
+    
+    def start_listening(self):
+        """Start listening for wake words"""
+        if not self.is_available:
+            print("⚠️ Wake word detection not available")
+            return
+        
+        if self.is_listening:
+            print("⚠️ Already listening for wake words")
+            return
+        
+        print("👂 Starting wake word detection...")
+        self.is_listening = True
+        self.is_paused = False
+        
+        # Start listening thread
+        thread = threading.Thread(target=self._listen_loop, daemon=True)
+        thread.start()
+    
+    def pause_listening(self):
+        """Pause wake word detection temporarily"""
+        if self.is_listening:
+            print("⏸️ Pausing wake word detection...")
+            self.is_paused = True
+    
+    def resume_listening(self):
+        """Resume wake word detection"""
+        if self.is_listening and self.is_paused:
+            print("▶️ Resuming wake word detection...")
+            self.is_paused = False
+    
+    def _listen_loop(self):
+        """Main listening loop"""
+        pyaudio_instance = pyaudio.PyAudio()
+        
+        try:
+            stream = pyaudio_instance.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self.config.SAMPLE_RATE,
+                input=True,
+                frames_per_buffer=self.config.FRAME_SIZE
+            )
+            
+            print("👂 Listening for wake words...")
+            
+            while self.is_listening:
+                try:
+                    # Skip processing if paused
+                    if self.is_paused:
+                        # Still read data to prevent buffer overflow
+                        stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
+                        time.sleep(0.1)
+                        continue
+                    
+                    data = stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
+                    
+                    if self.recognizer and self.recognizer.AcceptWaveform(data):
+                        result = json.loads(self.recognizer.Result())
+                        self._check_wake_word(result.get('text', ''))
+                    elif self.recognizer:
+                        partial = json.loads(self.recognizer.PartialResult())
+                        self._check_wake_word(partial.get('partial', ''))
+                
+                except Exception as e:
+                    print(f"⚠️ Wake word detection error: {e}")
+                    time.sleep(0.1)
+            
+            stream.stop_stream()
+            stream.close()
+            
+        except Exception as e:
+            print(f"❌ Wake word listening failed: {e}")
+        finally:
+            pyaudio_instance.terminate()
+            print("🛑 Wake word detection stopped")
+    
+    def _check_wake_word(self, text: str):
+        """Check if text contains wake word"""
+        if not text or self.is_paused:
+            return
+        
+        text = text.lower().strip()
+        current_time = time.time()
+        
+        # Check cooldown
+        if current_time - self.last_detection < self.config.WAKE_WORD_COOLDOWN:
+            return
+        
+        # Check for wake words
+        for wake_word in self.wake_words:
+            if wake_word in text:
+                confidence = self._calculate_confidence(text, wake_word)
+                if confidence >= self.config.WAKE_WORD_CONFIDENCE:
+                    print(f"🎯 WAKE WORD DETECTED: '{wake_word}' (confidence: {confidence:.2f})")
+                    self.last_detection = current_time
+                    # Pause immediately to prevent rapid triggers
+                    self.pause_listening()
+                    self.callback()
+                    break
+    
+    def _calculate_confidence(self, text: str, wake_word: str) -> float:
+        """Calculate confidence score"""
+        if wake_word == text:
+            return 1.0
+        
+        words_in_text = text.split()
+        words_in_wake = wake_word.split()
+        
+        matches = sum(1 for word in words_in_wake if word in words_in_text)
+        return matches / len(words_in_wake) if words_in_wake else 0.0
+    
+    def stop_listening(self):
+        """Stop listening for wake words"""
+        self.is_listening = False 
