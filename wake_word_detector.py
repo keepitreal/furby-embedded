@@ -8,6 +8,7 @@ import os
 import time
 import threading
 import pyaudio
+import numpy as np
 from typing import Callable
 
 # Optional import
@@ -88,7 +89,7 @@ class WakeWordDetector:
         try:
             stream = pyaudio_instance.open(
                 format=pyaudio.paInt16,
-                channels=1,
+                channels=self.config.CHANNELS,
                 rate=self.config.SAMPLE_RATE,
                 input=True,
                 frames_per_buffer=self.config.FRAME_SIZE
@@ -106,6 +107,14 @@ class WakeWordDetector:
                         continue
                     
                     data = stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
+                    
+                    # Convert stereo to mono for Vosk if needed
+                    if self.config.CHANNELS == 2:
+                        # Convert stereo to mono by averaging channels
+                        stereo_data = np.frombuffer(data, dtype=np.int16)
+                        stereo_data = stereo_data.reshape(-1, 2)
+                        mono_data = np.mean(stereo_data, axis=1).astype(np.int16)
+                        data = mono_data.tobytes()
                     
                     if self.recognizer and self.recognizer.AcceptWaveform(data):
                         result = json.loads(self.recognizer.Result())
