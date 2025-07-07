@@ -34,6 +34,11 @@ class WakeWordDetector:
         self.last_detection = 0
         self.wake_words = [word.strip().lower() for word in config.WAKE_WORDS]
         
+        # Audio stream management
+        self.stream = None
+        self.pyaudio_instance = None
+        self.listen_thread = None
+        
         if VOSK_AVAILABLE:
             self.setup_vosk()
     
@@ -68,8 +73,8 @@ class WakeWordDetector:
         self.is_paused = False
         
         # Start listening thread
-        thread = threading.Thread(target=self._listen_loop, daemon=True)
-        thread.start()
+        self.listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
+        self.listen_thread.start()
     
     def pause_listening(self):
         """Pause wake word detection temporarily"""
@@ -85,13 +90,13 @@ class WakeWordDetector:
     
     def _listen_loop(self):
         """Main listening loop"""
-        pyaudio_instance = pyaudio.PyAudio()
+        self.pyaudio_instance = pyaudio.PyAudio()
         
         try:
             # Use specific device index if configured
             device_index = getattr(self.config, 'AUDIO_DEVICE_INDEX', None)
             
-            stream = pyaudio_instance.open(
+            self.stream = self.pyaudio_instance.open(
                 format=pyaudio.paInt16,
                 channels=2,  # Always use stereo from WM8960 HAT
                 rate=48000,  # Use WM8960's native sample rate
@@ -107,44 +112,63 @@ class WakeWordDetector:
                     # Skip processing if paused
                     if self.is_paused:
                         # Still read data to prevent buffer overflow
-                        stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
+                        if self.stream and not self.stream.is_stopped():
+                            self.stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
                         time.sleep(0.1)
                         continue
                     
-                    data = stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
-                    
-                    # Convert stereo to mono and resample for Vosk
-                    # WM8960 gives us stereo at 48000 Hz, but Vosk needs mono at 16000 Hz
-                    stereo_data = np.frombuffer(data, dtype=np.int16)
-                    stereo_data = stereo_data.reshape(-1, 2)
-                    mono_data = np.mean(stereo_data, axis=1).astype(np.int16)
-                    
-                    # Simple decimation to resample from 48000 Hz to 16000 Hz (3:1 ratio)
-                    if len(mono_data) >= 3:
-                        resampled_data = mono_data[::3]  # Take every 3rd sample
-                        data = resampled_data.tobytes()
+                    if self.stream and not self.stream.is_stopped():
+                        data = self.stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
+                        
+                        # Convert stereo to mono and resample for Vosk
+                        # WM8960 gives us stereo at 48000 Hz, but Vosk needs mono at 16000 Hz
+                        stereo_data = np.frombuffer(data, dtype=np.int16)
+                        stereo_data = stereo_data.reshape(-1, 2)
+                        mono_data = np.mean(stereo_data, axis=1).astype(np.int16)
+                        
+                        # Simple decimation to resample from 48000 Hz to 16000 Hz (3:1 ratio)
+                        if len(mono_data) >= 3:
+                            resampled_data = mono_data[::3]  # Take every 3rd sample
+                            data = resampled_data.tobytes()
+                        else:
+                            data = mono_data.tobytes()
+                        
+                        if self.recognizer and self.recognizer.AcceptWaveform(data):
+                            result = json.loads(self.recognizer.Result())
+                            self._check_wake_word(result.get('text', ''))
+                        elif self.recognizer:
+                            partial = json.loads(self.recognizer.PartialResult())
+                            self._check_wake_word(partial.get('partial', ''))
                     else:
-                        data = mono_data.tobytes()
-                    
-                    if self.recognizer and self.recognizer.AcceptWaveform(data):
-                        result = json.loads(self.recognizer.Result())
-                        self._check_wake_word(result.get('text', ''))
-                    elif self.recognizer:
-                        partial = json.loads(self.recognizer.PartialResult())
-                        self._check_wake_word(partial.get('partial', ''))
+                        time.sleep(0.1)
                 
                 except Exception as e:
                     print(f"⚠️ Wake word detection error: {e}")
                     time.sleep(0.1)
             
-            stream.stop_stream()
-            stream.close()
-            
         except Exception as e:
             print(f"❌ Wake word listening failed: {e}")
         finally:
-            pyaudio_instance.terminate()
+            self._cleanup_audio()
             print("🛑 Wake word detection stopped")
+    
+    def _cleanup_audio(self):
+        """Clean up audio resources properly"""
+        try:
+            if self.stream:
+                if not self.stream.is_stopped():
+                    self.stream.stop_stream()
+                self.stream.close()
+                self.stream = None
+        except Exception as e:
+            print(f"⚠️ Stream cleanup error: {e}")
+        
+        try:
+            if self.pyaudio_instance:
+                self.pyaudio_instance.terminate()
+                self.pyaudio_instance = None
+        except Exception as e:
+            print(f"⚠️ PyAudio cleanup error: {e}")
     
     def _check_wake_word(self, text: str):
         """Check if text contains wake word"""
@@ -183,4 +207,13 @@ class WakeWordDetector:
     
     def stop_listening(self):
         """Stop listening for wake words"""
-        self.is_listening = False 
+        print("🛑 Stopping wake word detection...")
+        self.is_listening = False
+        
+        # Wait for thread to finish
+        if self.listen_thread and self.listen_thread.is_alive():
+            self.listen_thread.join(timeout=2.0)
+        
+        # Force cleanup if thread didn't finish
+        if self.stream or self.pyaudio_instance:
+            self._cleanup_audio() 
