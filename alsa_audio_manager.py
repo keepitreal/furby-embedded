@@ -162,7 +162,6 @@ class AlsaAudioManager:
             length, data = self.recording_pcm.read()
             
             if length > 0:
-                print(f"🎤 Read {length} audio samples ({len(data)} bytes)")
                 return data
             else:
                 # No data available (non-blocking mode)
