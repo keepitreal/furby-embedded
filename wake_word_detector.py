@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Wake Word Detection using Vosk for Furby
+Wake Word Detection using Vosk for Furby - Updated for ALSA Audio
 """
 
 import json
 import os
 import time
 import threading
-import pyaudio
 import numpy as np
 from typing import Callable
-from shared_audio_manager import SharedAudioManager
+from alsa_audio_manager import AlsaAudioManager
 
 # Optional import
 try:
@@ -22,7 +21,7 @@ except ImportError:
 
 
 class WakeWordDetector:
-    """Wake word detection using Vosk"""
+    """Wake word detection using Vosk with ALSA audio"""
     
     def __init__(self, config, callback: Callable):
         self.config = config
@@ -35,10 +34,14 @@ class WakeWordDetector:
         self.last_detection = 0
         self.wake_words = [word.strip().lower() for word in config.WAKE_WORDS]
         
-        # Use shared audio manager
-        self.audio_manager = SharedAudioManager(config)
-        self.stream_id = "wake_word_detector"
+        # Use ALSA audio manager
+        self.audio_manager = AlsaAudioManager(config)
         self.listen_thread = None
+        
+        print(f"🔧 Wake word detector initialized")
+        print(f"   ALSA available: {self.audio_manager.is_available}")
+        print(f"   Vosk available: {VOSK_AVAILABLE}")
+        print(f"   Wake words: {self.wake_words}")
         
         if VOSK_AVAILABLE:
             self.setup_vosk()
@@ -50,6 +53,7 @@ class WakeWordDetector:
             return
         
         try:
+            print(f"🔧 Loading Vosk model from: {self.config.VOSK_MODEL_PATH}")
             self.model = vosk.Model(self.config.VOSK_MODEL_PATH)
             # Vosk recognizer expects 16000 Hz after our resampling
             self.recognizer = vosk.KaldiRecognizer(self.model, 16000)
@@ -58,11 +62,14 @@ class WakeWordDetector:
             print(f"✅ Wake word detector ready - Words: {', '.join(self.wake_words)}")
         except Exception as e:
             print(f"❌ Wake word detector setup failed: {e}")
+            print(f"   Error type: {type(e).__name__}")
     
     def start_listening(self):
         """Start listening for wake words"""
         if not self.is_available:
             print("⚠️ Wake word detection not available")
+            print(f"   ALSA available: {self.audio_manager.is_available}")
+            print(f"   Vosk available: {VOSK_AVAILABLE}")
             return
         
         if self.is_listening:
@@ -70,12 +77,16 @@ class WakeWordDetector:
             return
         
         print("👂 Starting wake word detection...")
+        print(f"   Device: {self.audio_manager.device_name}")
+        print(f"   Recording: 48kHz stereo → 16kHz mono for Vosk")
+        
         self.is_listening = True
         self.is_paused = False
         
         # Start listening thread
         self.listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
         self.listen_thread.start()
+        print("✅ Wake word detection thread started")
     
     def pause_listening(self):
         """Pause wake word detection temporarily"""
@@ -90,74 +101,111 @@ class WakeWordDetector:
             self.is_paused = False
     
     def _listen_loop(self):
-        """Main listening loop"""
+        """Main listening loop using ALSA audio"""
         try:
-            # Create stream through shared audio manager
-            stream = self.audio_manager.create_stream(
-                self.stream_id,
-                format=pyaudio.paInt16,
-                channels=2,  # Always use stereo from WM8960 HAT
-                rate=48000,  # Use WM8960's native sample rate
-                input=True,
-                frames_per_buffer=self.config.FRAME_SIZE
-            )
+            print("🔧 Creating ALSA recording stream for wake word detection...")
             
-            if not stream:
-                print("❌ Failed to create wake word audio stream")
+            # Create recording stream: 48kHz stereo (WM8960 native)
+            if not self.audio_manager.create_recording_stream(
+                channels=2,  # Stereo
+                rate=48000,  # WM8960 native rate
+                period_size=self.config.FRAME_SIZE
+            ):
+                print("❌ Failed to create wake word recording stream")
                 return
             
-            print("👂 Listening for wake words...")
+            print("👂 Wake word detection listening started...")
             
             while self.is_listening:
                 try:
                     # Skip processing if paused
                     if self.is_paused:
                         # Still read data to prevent buffer overflow
-                        if stream and not stream.is_stopped():
-                            stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
+                        data = self.audio_manager.read_audio()
+                        if data is None:
+                            print("⚠️ Failed to read audio data while paused")
+                            time.sleep(0.1)
+                        continue
+                    
+                    # Read audio data
+                    data = self.audio_manager.read_audio()
+                    
+                    if data is None:
+                        print("⚠️ Failed to read audio data")
                         time.sleep(0.1)
                         continue
                     
-                    if stream and not stream.is_stopped():
-                        data = stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
-                        
-                        # Convert stereo to mono and resample for Vosk
-                        # WM8960 gives us stereo at 48000 Hz, but Vosk needs mono at 16000 Hz
-                        stereo_data = np.frombuffer(data, dtype=np.int16)
-                        stereo_data = stereo_data.reshape(-1, 2)
-                        mono_data = np.mean(stereo_data, axis=1).astype(np.int16)
-                        
-                        # Simple decimation to resample from 48000 Hz to 16000 Hz (3:1 ratio)
-                        if len(mono_data) >= 3:
-                            resampled_data = mono_data[::3]  # Take every 3rd sample
-                            data = resampled_data.tobytes()
-                        else:
-                            data = mono_data.tobytes()
-                        
-                        if self.recognizer and self.recognizer.AcceptWaveform(data):
+                    if len(data) == 0:
+                        # No data available (non-blocking mode)
+                        time.sleep(0.01)
+                        continue
+                    
+                    # Process audio for wake word detection
+                    processed_data = self._process_audio_for_vosk(data)
+                    
+                    if processed_data and self.recognizer:
+                        if self.recognizer.AcceptWaveform(processed_data):
                             result = json.loads(self.recognizer.Result())
                             self._check_wake_word(result.get('text', ''))
-                        elif self.recognizer:
+                        else:
                             partial = json.loads(self.recognizer.PartialResult())
                             self._check_wake_word(partial.get('partial', ''))
-                    else:
-                        time.sleep(0.1)
-                
+                    
                 except Exception as e:
                     print(f"⚠️ Wake word detection error: {e}")
+                    print(f"   Error type: {type(e).__name__}")
                     time.sleep(0.1)
             
         except Exception as e:
             print(f"❌ Wake word listening failed: {e}")
+            print(f"   Error type: {type(e).__name__}")
         finally:
             self._cleanup_audio()
             print("🛑 Wake word detection stopped")
     
+    def _process_audio_for_vosk(self, raw_data: bytes) -> bytes:
+        """Process raw ALSA audio data for Vosk recognition"""
+        try:
+            # Convert raw bytes to numpy array (16-bit stereo)
+            stereo_data = np.frombuffer(raw_data, dtype=np.int16)
+            
+            if len(stereo_data) == 0:
+                return b''
+            
+            # Reshape to stereo (2 channels)
+            if len(stereo_data) % 2 != 0:
+                # Odd number of samples, trim one
+                stereo_data = stereo_data[:-1]
+            
+            stereo_data = stereo_data.reshape(-1, 2)
+            
+            # Convert stereo to mono (average channels)
+            mono_data = np.mean(stereo_data, axis=1).astype(np.int16)
+            
+            # Resample from 48000 Hz to 16000 Hz (3:1 ratio)
+            # Simple decimation: take every 3rd sample
+            if len(mono_data) >= 3:
+                resampled_data = mono_data[::3]
+            else:
+                resampled_data = mono_data
+            
+            # Calculate audio level for debugging
+            if len(resampled_data) > 0:
+                audio_level = np.sqrt(np.mean(resampled_data**2))
+                if audio_level > 100:  # Only log when there's actual audio
+                    print(f"🎤 Wake word audio level: {audio_level:.1f}", end='\r')
+            
+            return resampled_data.tobytes()
+            
+        except Exception as e:
+            print(f"⚠️ Audio processing error: {e}")
+            return b''
+    
     def _cleanup_audio(self):
         """Clean up audio resources properly"""
         try:
-            # Close the stream through shared audio manager
-            self.audio_manager.close_stream(self.stream_id)
+            print("🧹 Cleaning up wake word audio resources...")
+            self.audio_manager.close_recording_stream()
             print("🔧 Wake word audio stream closed")
         except Exception as e:
             print(f"⚠️ Wake word stream cleanup error: {e}")
@@ -187,7 +235,8 @@ class WakeWordDetector:
             if wake_word in text:
                 confidence = self._calculate_confidence(text, wake_word)
                 if confidence >= self.config.WAKE_WORD_CONFIDENCE:
-                    print(f"🎯 WAKE WORD DETECTED: '{wake_word}' (confidence: {confidence:.2f})")
+                    print(f"\n🎯 WAKE WORD DETECTED: '{wake_word}' (confidence: {confidence:.2f})")
+                    print(f"   Full text: '{text}'")
                     self.last_detection = current_time
                     # Pause immediately to prevent rapid triggers
                     self.pause_listening()
@@ -212,14 +261,14 @@ class WakeWordDetector:
         
         # Wait for thread to finish
         if self.listen_thread and self.listen_thread.is_alive():
-            print("⏳ Waiting for listening thread to finish...")
+            print("⏳ Waiting for wake word thread to finish...")
             self.listen_thread.join(timeout=3.0)
             if self.listen_thread.is_alive():
-                print("⚠️ Listening thread did not finish gracefully")
+                print("⚠️ Wake word thread did not finish gracefully")
         
         # Force cleanup even if thread didn't finish properly
-        if self.audio_manager.is_stream_active(self.stream_id):
-            print("🔧 Force cleaning up audio resources...")
+        if self.audio_manager.is_recording:
+            print("🔧 Force cleaning up wake word audio resources...")
             self._cleanup_audio()
         
         print("✅ Wake word detection stopped") 
