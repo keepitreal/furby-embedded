@@ -40,6 +40,7 @@ class FurbyConfig:
         self.SAMPLE_RATE = int(os.getenv('SAMPLE_RATE', 16000))
         self.CHANNELS = int(os.getenv('CHANNELS', 1))
         self.FRAME_SIZE = int(os.getenv('FRAME_SIZE', 4000))
+        self.AUDIO_DEVICE_INDEX = int(os.getenv('AUDIO_DEVICE_INDEX', 0))
         
         # Voice Activity Detection
         self.VAD_SILENCE_DURATION = float(os.getenv('VAD_SILENCE_DURATION', 2.0))  # seconds

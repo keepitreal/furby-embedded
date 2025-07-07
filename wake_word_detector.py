@@ -45,7 +45,8 @@ class WakeWordDetector:
         
         try:
             self.model = vosk.Model(self.config.VOSK_MODEL_PATH)
-            self.recognizer = vosk.KaldiRecognizer(self.model, self.config.SAMPLE_RATE)
+            # Vosk recognizer expects 16000 Hz after our resampling
+            self.recognizer = vosk.KaldiRecognizer(self.model, 16000)
             self.recognizer.SetWords(True)
             self.is_available = True
             print(f"✅ Wake word detector ready - Words: {', '.join(self.wake_words)}")
@@ -87,11 +88,15 @@ class WakeWordDetector:
         pyaudio_instance = pyaudio.PyAudio()
         
         try:
+            # Use specific device index if configured
+            device_index = getattr(self.config, 'AUDIO_DEVICE_INDEX', None)
+            
             stream = pyaudio_instance.open(
                 format=pyaudio.paInt16,
-                channels=self.config.CHANNELS,
-                rate=self.config.SAMPLE_RATE,
+                channels=2,  # Always use stereo from WM8960 HAT
+                rate=48000,  # Use WM8960's native sample rate
                 input=True,
+                input_device_index=device_index,
                 frames_per_buffer=self.config.FRAME_SIZE
             )
             
@@ -108,12 +113,17 @@ class WakeWordDetector:
                     
                     data = stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
                     
-                    # Convert stereo to mono for Vosk if needed
-                    if self.config.CHANNELS == 2:
-                        # Convert stereo to mono by averaging channels
-                        stereo_data = np.frombuffer(data, dtype=np.int16)
-                        stereo_data = stereo_data.reshape(-1, 2)
-                        mono_data = np.mean(stereo_data, axis=1).astype(np.int16)
+                    # Convert stereo to mono and resample for Vosk
+                    # WM8960 gives us stereo at 48000 Hz, but Vosk needs mono at 16000 Hz
+                    stereo_data = np.frombuffer(data, dtype=np.int16)
+                    stereo_data = stereo_data.reshape(-1, 2)
+                    mono_data = np.mean(stereo_data, axis=1).astype(np.int16)
+                    
+                    # Simple decimation to resample from 48000 Hz to 16000 Hz (3:1 ratio)
+                    if len(mono_data) >= 3:
+                        resampled_data = mono_data[::3]  # Take every 3rd sample
+                        data = resampled_data.tobytes()
+                    else:
                         data = mono_data.tobytes()
                     
                     if self.recognizer and self.recognizer.AcceptWaveform(data):
