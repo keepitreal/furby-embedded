@@ -160,6 +160,7 @@ class WakeWordDetector:
                     self.stream.stop_stream()
                 self.stream.close()
                 self.stream = None
+                print("🔧 Audio stream closed")
         except Exception as e:
             print(f"⚠️ Stream cleanup error: {e}")
         
@@ -167,8 +168,17 @@ class WakeWordDetector:
             if self.pyaudio_instance:
                 self.pyaudio_instance.terminate()
                 self.pyaudio_instance = None
+                print("🔧 PyAudio terminated")
         except Exception as e:
             print(f"⚠️ PyAudio cleanup error: {e}")
+        
+        # Additional cleanup - force garbage collection
+        try:
+            import gc
+            gc.collect()
+            print("🧹 Forced garbage collection")
+        except Exception as e:
+            print(f"⚠️ Garbage collection error: {e}")
     
     def _check_wake_word(self, text: str):
         """Check if text contains wake word"""
@@ -212,8 +222,14 @@ class WakeWordDetector:
         
         # Wait for thread to finish
         if self.listen_thread and self.listen_thread.is_alive():
-            self.listen_thread.join(timeout=2.0)
+            print("⏳ Waiting for listening thread to finish...")
+            self.listen_thread.join(timeout=3.0)
+            if self.listen_thread.is_alive():
+                print("⚠️ Listening thread did not finish gracefully")
         
-        # Force cleanup if thread didn't finish
+        # Force cleanup even if thread didn't finish properly
         if self.stream or self.pyaudio_instance:
-            self._cleanup_audio() 
+            print("🔧 Force cleaning up audio resources...")
+            self._cleanup_audio()
+        
+        print("✅ Wake word detection stopped") 

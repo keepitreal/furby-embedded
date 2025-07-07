@@ -29,6 +29,9 @@ class AudioManager:
         
     def list_audio_devices(self):
         """List available audio devices"""
+        if not self.pyaudio:
+            return []
+            
         devices = []
         for i in range(self.pyaudio.get_device_count()):
             info = self.pyaudio.get_device_info_by_index(i)
@@ -44,6 +47,10 @@ class AudioManager:
         """Record audio with voice activity detection"""
         if self.is_recording:
             print("⚠️ Already recording")
+            return None
+        
+        if not self.pyaudio:
+            print("❌ PyAudio not available")
             return None
             
         max_duration = max_duration or self.config.MAX_RECORDING_DURATION
@@ -105,7 +112,10 @@ class AudioManager:
             
             with wave.open(filename, 'wb') as wav_file:
                 wav_file.setnchannels(self.config.CHANNELS)
-                wav_file.setsampwidth(self.pyaudio.get_sample_size(pyaudio.paInt16))
+                if self.pyaudio:  # Check if pyaudio is still available
+                    wav_file.setsampwidth(self.pyaudio.get_sample_size(pyaudio.paInt16))
+                else:
+                    wav_file.setsampwidth(2)  # 16-bit = 2 bytes
                 wav_file.setframerate(self.config.SAMPLE_RATE)
                 wav_file.writeframes(b''.join(audio_data))
             
@@ -187,7 +197,38 @@ class AudioManager:
     
     def cleanup(self):
         """Cleanup audio resources"""
+        print("🧹 Cleaning up audio manager...")
+        
+        # Stop any active operations
         self.stop_recording()
         self.stop_playback()
+        
+        # Clean up any current stream
+        if self.current_stream:
+            try:
+                if not self.current_stream.is_stopped():
+                    self.current_stream.stop_stream()
+                self.current_stream.close()
+                self.current_stream = None
+                print("🔧 Audio manager stream closed")
+            except Exception as e:
+                print(f"⚠️ Audio manager stream cleanup error: {e}")
+        
+        # Terminate PyAudio
         if self.pyaudio:
-            self.pyaudio.terminate() 
+            try:
+                self.pyaudio.terminate()
+                self.pyaudio = None
+                print("🔧 Audio manager PyAudio terminated")
+            except Exception as e:
+                print(f"⚠️ Audio manager PyAudio cleanup error: {e}")
+        
+        # Force garbage collection
+        try:
+            import gc
+            gc.collect()
+            print("🧹 Audio manager garbage collection completed")
+        except Exception as e:
+            print(f"⚠️ Audio manager garbage collection error: {e}")
+        
+        print("✅ Audio manager cleanup completed") 
