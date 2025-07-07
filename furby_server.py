@@ -120,15 +120,28 @@ class FurbyServer:
                 max_duration = data.get('max_duration', self.config.MAX_RECORDING_DURATION)
                 
                 print(f"📡 API: Recording audio (max {max_duration}s)...")
-                audio_file = self.audio_manager.record_with_vad(max_duration)
                 
-                if audio_file:
-                    return jsonify({'success': True, 'audio_file': audio_file})
-                else:
-                    return jsonify({'error': 'Recording failed'}), 500
+                # Temporarily stop wake word recording stream to free the audio device
+                wake_word_was_active = self.wake_word_detector.stop_recording_stream()
+                
+                try:
+                    audio_file = self.audio_manager.record_with_vad(max_duration)
+                    
+                    if audio_file:
+                        print(f"✅ Manual recording completed: {audio_file}")
+                        return jsonify({'success': True, 'audio_file': audio_file})
+                    else:
+                        print("❌ Manual recording failed")
+                        return jsonify({'error': 'Recording failed'}), 500
+                        
+                finally:
+                    # Restart wake word recording stream if it was active before
+                    if wake_word_was_active:
+                        self.wake_word_detector.restart_recording_stream()
                     
             except Exception as e:
                 print(f"❌ Recording error: {e}")
+                print(f"   Error type: {type(e).__name__}")
                 return jsonify({'error': str(e)}), 500
         
         @self.app.route('/respond', methods=['POST'])
@@ -210,58 +223,67 @@ class FurbyServer:
         self.is_processing = True
         
         try:
-            # Record audio with VAD
-            print("🎤 Recording with voice activity detection...")
-            audio_file = self.audio_manager.record_with_vad()
+            # Temporarily stop wake word recording stream for voice recording
+            wake_word_was_active = self.wake_word_detector.stop_recording_stream()
             
-            if not audio_file:
-                print("❌ No audio recorded")
-                return
-            
-            # Transcribe with Vosk
-            print("📝 Converting speech to text...")
-            transcription = self.stt_engine.transcribe_audio_file(audio_file)
-            
-            if not transcription or not transcription.strip():
-                print("⚠️ No speech detected")
-                return
-            
-            print(f"📋 Transcription: '{transcription}'")
-            
-            # Send to backend
-            print("🌐 Sending to backend...")
-            response = self.backend_client.send_text_for_response(transcription)
-            
-            # Handle response
-            print(f"🔍 Response analysis: audio={bool(response.get('audio'))}, phonemes={len(response.get('phonemes', []))}, fallback={response.get('isFallback')}")
-            
-            if response.get('audio') and not response.get('isFallback'):
-                print("🎵 Playing audio with phoneme animation")
-                # Play TTS audio with mouth animation
-                # Save as output file in development mode, otherwise as TTS
-                audio_type = 'output' if self.config.DEVELOPMENT_MODE else 'tts'
-                print(f"🔍 Saving audio as: {audio_type} (dev_mode={self.config.DEVELOPMENT_MODE})")
-                audio_file = self.audio_manager.save_base64_audio(response['audio'], audio_type=audio_type)
+            try:
+                # Record audio with VAD
+                print("🎤 Recording with voice activity detection...")
+                audio_file = self.audio_manager.record_with_vad()
                 
-                audio_thread = threading.Thread(target=self.audio_manager.play_audio, args=(audio_file,))
-                servo_thread = threading.Thread(target=self.servo_controller.animate_mouth, args=(response.get('phonemes', []),))
+                if not audio_file:
+                    print("❌ No audio recorded")
+                    return
                 
-                audio_thread.start()
-                servo_thread.start()
+                # Transcribe with Vosk
+                print("📝 Converting speech to text...")
+                transcription = self.stt_engine.transcribe_audio_file(audio_file)
                 
-                audio_thread.join()
-                servo_thread.join()
+                if not transcription or not transcription.strip():
+                    print("⚠️ No speech detected")
+                    return
                 
-            elif response.get('phonemes'):
-                print("🎭 Phoneme-only animation (no audio)")
-                # Just mouth animation
-                self.servo_controller.animate_mouth(response['phonemes'])
-            else:
-                print("🎭 Fallback animation (no audio, no phonemes)")
-                # Fallback animation
-                self.servo_controller.animate_mouth()
-            
-            print("✅ Voice interaction completed")
+                print(f"📋 Transcription: '{transcription}'")
+                
+                # Send to backend
+                print("🌐 Sending to backend...")
+                response = self.backend_client.send_text_for_response(transcription)
+                
+                # Handle response
+                print(f"🔍 Response analysis: audio={bool(response.get('audio'))}, phonemes={len(response.get('phonemes', []))}, fallback={response.get('isFallback')}")
+                
+                if response.get('audio') and not response.get('isFallback'):
+                    print("🎵 Playing audio with phoneme animation")
+                    # Play TTS audio with mouth animation
+                    # Save as output file in development mode, otherwise as TTS
+                    audio_type = 'output' if self.config.DEVELOPMENT_MODE else 'tts'
+                    print(f"🔍 Saving audio as: {audio_type} (dev_mode={self.config.DEVELOPMENT_MODE})")
+                    audio_file = self.audio_manager.save_base64_audio(response['audio'], audio_type=audio_type)
+                    
+                    audio_thread = threading.Thread(target=self.audio_manager.play_audio, args=(audio_file,))
+                    servo_thread = threading.Thread(target=self.servo_controller.animate_mouth, args=(response.get('phonemes', []),))
+                    
+                    audio_thread.start()
+                    servo_thread.start()
+                    
+                    audio_thread.join()
+                    servo_thread.join()
+                    
+                elif response.get('phonemes'):
+                    print("🎭 Phoneme-only animation (no audio)")
+                    # Just mouth animation
+                    self.servo_controller.animate_mouth(response['phonemes'])
+                else:
+                    print("🎭 Fallback animation (no audio, no phonemes)")
+                    # Fallback animation
+                    self.servo_controller.animate_mouth()
+                
+                print("✅ Voice interaction completed")
+                
+            finally:
+                # Restart wake word recording stream if it was active
+                if wake_word_was_active:
+                    self.wake_word_detector.restart_recording_stream()
             
         except Exception as e:
             print(f"❌ Voice processing error: {e}")
@@ -273,11 +295,6 @@ class FurbyServer:
                 pass
         finally:
             self.is_processing = False
-            # Resume wake word detection after processing
-            try:
-                self.wake_word_detector.resume_listening()
-            except Exception as e:
-                print(f"⚠️ Failed to resume wake word detection: {e}")
     
     def run(self):
         """Start the Furby server"""

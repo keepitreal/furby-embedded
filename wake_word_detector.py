@@ -100,6 +100,24 @@ class WakeWordDetector:
             print("▶️ Resuming wake word detection...")
             self.is_paused = False
     
+    def stop_recording_stream(self):
+        """Temporarily stop the recording stream (for manual recording)"""
+        if self.is_listening and not self.is_paused:
+            print("⏸️ Temporarily stopping wake word recording stream...")
+            self.is_paused = True
+            self.audio_manager.close_recording_stream()
+            return True
+        return False
+    
+    def restart_recording_stream(self):
+        """Restart the recording stream (after manual recording)"""
+        if self.is_listening and self.is_paused:
+            print("▶️ Restarting wake word recording stream...")
+            # The recording stream will be recreated in the listen loop
+            self.is_paused = False
+            return True
+        return False
+    
     def _listen_loop(self):
         """Main listening loop using ALSA audio"""
         try:
@@ -118,12 +136,34 @@ class WakeWordDetector:
             
             while self.is_listening:
                 try:
+                    # Check if we need to recreate the recording stream
+                    if self.is_paused and not self.audio_manager.is_recording:
+                        # Stream was closed for manual recording, skip processing
+                        time.sleep(0.1)
+                        continue
+                    
+                    # If we resumed from pause, recreate the recording stream
+                    if not self.is_paused and not self.audio_manager.is_recording:
+                        print("🔄 Recreating wake word recording stream after manual recording...")
+                        if not self.audio_manager.create_recording_stream(
+                            channels=2,
+                            rate=48000,
+                            period_size=self.config.FRAME_SIZE
+                        ):
+                            print("❌ Failed to recreate wake word recording stream")
+                            time.sleep(1)
+                            continue
+                        print("✅ Wake word recording stream recreated")
+                    
                     # Skip processing if paused
                     if self.is_paused:
-                        # Still read data to prevent buffer overflow
-                        data = self.audio_manager.read_audio()
-                        if data is None:
-                            print("⚠️ Failed to read audio data while paused")
+                        # Still read data to prevent buffer overflow if stream is active
+                        if self.audio_manager.is_recording:
+                            data = self.audio_manager.read_audio()
+                            if data is None:
+                                print("⚠️ Failed to read audio data while paused")
+                                time.sleep(0.1)
+                        else:
                             time.sleep(0.1)
                         continue
                     
