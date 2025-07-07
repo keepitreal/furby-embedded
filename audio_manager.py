@@ -12,6 +12,7 @@ import sys
 import numpy as np
 import pyaudio
 from typing import Optional, List, Dict
+from shared_audio_manager import SharedAudioManager
 
 
 class AudioManager:
@@ -19,29 +20,17 @@ class AudioManager:
     
     def __init__(self, config):
         self.config = config
-        self.pyaudio = pyaudio.PyAudio()
+        self.shared_audio = SharedAudioManager(config)
         self.is_recording = False
         self.is_playing = False
-        self.current_stream = None
+        self.recording_stream_id = "audio_manager_recording"
         
         # Ensure audio directory exists
         os.makedirs(config.AUDIO_PATH, exist_ok=True)
         
     def list_audio_devices(self):
         """List available audio devices"""
-        if not self.pyaudio:
-            return []
-            
-        devices = []
-        for i in range(self.pyaudio.get_device_count()):
-            info = self.pyaudio.get_device_info_by_index(i)
-            devices.append({
-                'index': i,
-                'name': info['name'],
-                'channels': info['maxInputChannels'],
-                'sample_rate': info['defaultSampleRate']
-            })
-        return devices
+        return self.shared_audio.list_devices()
     
     def record_with_vad(self, max_duration: Optional[float] = None) -> Optional[str]:
         """Record audio with voice activity detection"""
@@ -49,7 +38,7 @@ class AudioManager:
             print("⚠️ Already recording")
             return None
         
-        if not self.pyaudio:
+        if not self.shared_audio.pyaudio_instance:
             print("❌ PyAudio not available")
             return None
             
@@ -61,13 +50,18 @@ class AudioManager:
         silence_start = None
         
         try:
-            stream = self.pyaudio.open(
+            stream = self.shared_audio.create_stream(
+                self.recording_stream_id,
                 format=pyaudio.paInt16,
                 channels=self.config.CHANNELS,
                 rate=self.config.SAMPLE_RATE,
                 input=True,
                 frames_per_buffer=self.config.FRAME_SIZE
             )
+            
+            if not stream:
+                print("❌ Failed to create recording stream")
+                return None
             
             start_time = time.time()
             
@@ -99,8 +93,8 @@ class AudioManager:
                     print(f"⚠️ Recording error: {e}")
                     break
             
-            stream.stop_stream()
-            stream.close()
+            # Close stream through shared audio manager
+            self.shared_audio.close_stream(self.recording_stream_id)
             
             if not audio_data:
                 print("❌ No audio recorded")
@@ -112,8 +106,8 @@ class AudioManager:
             
             with wave.open(filename, 'wb') as wav_file:
                 wav_file.setnchannels(self.config.CHANNELS)
-                if self.pyaudio:  # Check if pyaudio is still available
-                    wav_file.setsampwidth(self.pyaudio.get_sample_size(pyaudio.paInt16))
+                if self.shared_audio.pyaudio_instance:  # Check if pyaudio is still available
+                    wav_file.setsampwidth(self.shared_audio.pyaudio_instance.get_sample_size(pyaudio.paInt16))
                 else:
                     wav_file.setsampwidth(2)  # 16-bit = 2 bytes
                 wav_file.setframerate(self.config.SAMPLE_RATE)
@@ -203,32 +197,13 @@ class AudioManager:
         self.stop_recording()
         self.stop_playback()
         
-        # Clean up any current stream
-        if self.current_stream:
-            try:
-                if not self.current_stream.is_stopped():
-                    self.current_stream.stop_stream()
-                self.current_stream.close()
-                self.current_stream = None
-                print("🔧 Audio manager stream closed")
-            except Exception as e:
-                print(f"⚠️ Audio manager stream cleanup error: {e}")
-        
-        # Terminate PyAudio
-        if self.pyaudio:
-            try:
-                self.pyaudio.terminate()
-                self.pyaudio = None
-                print("🔧 Audio manager PyAudio terminated")
-            except Exception as e:
-                print(f"⚠️ Audio manager PyAudio cleanup error: {e}")
-        
-        # Force garbage collection
+        # Clean up recording stream
         try:
-            import gc
-            gc.collect()
-            print("🧹 Audio manager garbage collection completed")
+            if self.shared_audio.is_stream_active(self.recording_stream_id):
+                self.shared_audio.close_stream(self.recording_stream_id)
+                print("🔧 Audio manager recording stream closed")
         except Exception as e:
-            print(f"⚠️ Audio manager garbage collection error: {e}")
+            print(f"⚠️ Audio manager stream cleanup error: {e}")
         
+        # The shared audio manager will handle PyAudio cleanup
         print("✅ Audio manager cleanup completed") 

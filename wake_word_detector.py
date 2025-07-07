@@ -10,6 +10,7 @@ import threading
 import pyaudio
 import numpy as np
 from typing import Callable
+from shared_audio_manager import SharedAudioManager
 
 # Optional import
 try:
@@ -34,9 +35,9 @@ class WakeWordDetector:
         self.last_detection = 0
         self.wake_words = [word.strip().lower() for word in config.WAKE_WORDS]
         
-        # Audio stream management
-        self.stream = None
-        self.pyaudio_instance = None
+        # Use shared audio manager
+        self.audio_manager = SharedAudioManager(config)
+        self.stream_id = "wake_word_detector"
         self.listen_thread = None
         
         if VOSK_AVAILABLE:
@@ -90,20 +91,20 @@ class WakeWordDetector:
     
     def _listen_loop(self):
         """Main listening loop"""
-        self.pyaudio_instance = pyaudio.PyAudio()
-        
         try:
-            # Use specific device index if configured
-            device_index = getattr(self.config, 'AUDIO_DEVICE_INDEX', None)
-            
-            self.stream = self.pyaudio_instance.open(
+            # Create stream through shared audio manager
+            stream = self.audio_manager.create_stream(
+                self.stream_id,
                 format=pyaudio.paInt16,
                 channels=2,  # Always use stereo from WM8960 HAT
                 rate=48000,  # Use WM8960's native sample rate
                 input=True,
-                input_device_index=device_index,
                 frames_per_buffer=self.config.FRAME_SIZE
             )
+            
+            if not stream:
+                print("❌ Failed to create wake word audio stream")
+                return
             
             print("👂 Listening for wake words...")
             
@@ -112,13 +113,13 @@ class WakeWordDetector:
                     # Skip processing if paused
                     if self.is_paused:
                         # Still read data to prevent buffer overflow
-                        if self.stream and not self.stream.is_stopped():
-                            self.stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
+                        if stream and not stream.is_stopped():
+                            stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
                         time.sleep(0.1)
                         continue
                     
-                    if self.stream and not self.stream.is_stopped():
-                        data = self.stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
+                    if stream and not stream.is_stopped():
+                        data = stream.read(self.config.FRAME_SIZE, exception_on_overflow=False)
                         
                         # Convert stereo to mono and resample for Vosk
                         # WM8960 gives us stereo at 48000 Hz, but Vosk needs mono at 16000 Hz
@@ -155,30 +156,19 @@ class WakeWordDetector:
     def _cleanup_audio(self):
         """Clean up audio resources properly"""
         try:
-            if self.stream:
-                if not self.stream.is_stopped():
-                    self.stream.stop_stream()
-                self.stream.close()
-                self.stream = None
-                print("🔧 Audio stream closed")
+            # Close the stream through shared audio manager
+            self.audio_manager.close_stream(self.stream_id)
+            print("🔧 Wake word audio stream closed")
         except Exception as e:
-            print(f"⚠️ Stream cleanup error: {e}")
-        
-        try:
-            if self.pyaudio_instance:
-                self.pyaudio_instance.terminate()
-                self.pyaudio_instance = None
-                print("🔧 PyAudio terminated")
-        except Exception as e:
-            print(f"⚠️ PyAudio cleanup error: {e}")
+            print(f"⚠️ Wake word stream cleanup error: {e}")
         
         # Additional cleanup - force garbage collection
         try:
             import gc
             gc.collect()
-            print("🧹 Forced garbage collection")
+            print("🧹 Wake word forced garbage collection")
         except Exception as e:
-            print(f"⚠️ Garbage collection error: {e}")
+            print(f"⚠️ Wake word garbage collection error: {e}")
     
     def _check_wake_word(self, text: str):
         """Check if text contains wake word"""
@@ -228,7 +218,7 @@ class WakeWordDetector:
                 print("⚠️ Listening thread did not finish gracefully")
         
         # Force cleanup even if thread didn't finish properly
-        if self.stream or self.pyaudio_instance:
+        if self.audio_manager.is_stream_active(self.stream_id):
             print("🔧 Force cleaning up audio resources...")
             self._cleanup_audio()
         

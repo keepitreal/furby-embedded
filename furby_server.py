@@ -294,9 +294,20 @@ class FurbyServer:
         print("🧹 Cleaning up resources...")
         
         try:
+            # Stop wake word detector first
             self.wake_word_detector.stop_listening()
+            
+            # Clean up audio manager
             self.audio_manager.cleanup()
+            
+            # Clean up servo controller
             self.servo_controller.cleanup()
+            
+            # Finally, clean up the shared audio manager
+            from shared_audio_manager import SharedAudioManager
+            shared_audio = SharedAudioManager()
+            shared_audio.cleanup()
+            
         except Exception as e:
             print(f"⚠️ Cleanup error: {e}")
         
