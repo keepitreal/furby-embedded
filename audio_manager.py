@@ -47,20 +47,26 @@ class AudioManager:
             return None
             
         max_duration = max_duration or self.config.MAX_RECORDING_DURATION
+        
+        # Force stereo recording for WM8960 compatibility, even if config says mono
+        recording_channels = 2  # WM8960 works best with stereo
+        recording_rate = self.config.SAMPLE_RATE
+        
         print(f"🎤 Starting VAD recording (max {max_duration}s)...")
         print(f"   Device: {self.alsa_audio.device_name}")
-        print(f"   Sample rate: {self.config.SAMPLE_RATE} Hz")
-        print(f"   Channels: {self.config.CHANNELS}")
+        print(f"   Sample rate: {recording_rate} Hz")
+        print(f"   Channels: {recording_channels} (stereo for WM8960 compatibility)")
         
         self.is_recording = True
         audio_data = []
         silence_start = None
         
         try:
+            
             # Create ALSA recording stream
             if not self.alsa_audio.create_recording_stream(
-                channels=self.config.CHANNELS,
-                rate=self.config.SAMPLE_RATE,
+                channels=recording_channels,
+                rate=recording_rate,
                 period_size=self.config.FRAME_SIZE
             ):
                 print("❌ Failed to create recording stream")
@@ -87,7 +93,7 @@ class AudioManager:
                         continue
                     
                     audio_data.append(chunk)
-                    frames_read += len(chunk) // (self.config.CHANNELS * 2)  # 2 bytes per sample
+                    frames_read += len(chunk) // (recording_channels * 2)  # 2 bytes per sample
                     
                     # Calculate energy level for VAD
                     audio_np = np.frombuffer(chunk, dtype=np.int16)
@@ -126,9 +132,9 @@ class AudioManager:
             print(f"\n💾 Saving recording to: {filename}")
             
             with wave.open(filename, 'wb') as wav_file:
-                wav_file.setnchannels(self.config.CHANNELS)
+                wav_file.setnchannels(recording_channels)  # Use stereo for WM8960 compatibility
                 wav_file.setsampwidth(2)  # 16-bit = 2 bytes
-                wav_file.setframerate(self.config.SAMPLE_RATE)
+                wav_file.setframerate(recording_rate)
                 wav_file.writeframes(b''.join(audio_data))
             
             duration = time.time() - start_time

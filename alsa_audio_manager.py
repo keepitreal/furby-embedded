@@ -45,6 +45,7 @@ class AlsaAudioManager:
         if self.is_available:
             print(f"✅ AlsaAudioManager initialized for device: {self.device_name}")
             self._log_alsa_info()
+            self._configure_wm8960_mixers()
         else:
             print("❌ AlsaAudioManager not available - alsaaudio missing")
     
@@ -65,6 +66,65 @@ class AlsaAudioManager:
             
         except Exception as e:
             print(f"⚠️ Could not get ALSA info: {e}")
+    
+    def _configure_wm8960_mixers(self):
+        """Configure WM8960 HAT mixers for proper audio output"""
+        print("🔧 Configuring WM8960 HAT mixers...")
+        
+        import subprocess
+        
+        # Critical mixer settings for audio output
+        mixer_commands = [
+            # Enable main output mixers (CRITICAL!)
+            "amixer -c 0 sset 'Mono Output Mixer Left' on",
+            "amixer -c 0 sset 'Mono Output Mixer Right' on",
+            
+            # Enable zero-crossing detection for better audio quality
+            "amixer -c 0 sset 'Speaker Playback ZC' on",
+            "amixer -c 0 sset 'Headphone Playback ZC' on",
+            
+            # Ensure output mixers have PCM input enabled
+            "amixer -c 0 sset 'Left Output Mixer PCM' on",
+            "amixer -c 0 sset 'Right Output Mixer PCM' on",
+            
+            # Set reasonable volume levels if they're too low
+            "amixer -c 0 sset 'Speaker' 90%",
+            "amixer -c 0 sset 'Headphone' 90%",
+            "amixer -c 0 sset 'Playback' 100%",
+        ]
+        
+        success_count = 0
+        for cmd in mixer_commands:
+            try:
+                result = subprocess.run(
+                    cmd.split(), 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    success_count += 1
+                    print(f"   ✅ {cmd.split()[-2]} {cmd.split()[-1]}")
+                else:
+                    print(f"   ⚠️ Failed: {cmd}")
+                    if result.stderr:
+                        print(f"      Error: {result.stderr.strip()}")
+                        
+            except subprocess.TimeoutExpired:
+                print(f"   ⏰ Timeout: {cmd}")
+            except Exception as e:
+                print(f"   ❌ Error: {cmd} - {e}")
+        
+        print(f"🔧 WM8960 mixer configuration: {success_count}/{len(mixer_commands)} successful")
+        
+        # Verify critical mixers are enabled
+        if success_count >= 6:  # At least the critical ones worked
+            print("✅ WM8960 HAT should now have audio output enabled")
+        else:
+            print("⚠️ Some mixer configurations failed - audio output may not work")
+            print("   You may need to run mixer commands manually:")
+            print("   amixer -c 0 sset 'Mono Output Mixer Left' on")
+            print("   amixer -c 0 sset 'Mono Output Mixer Right' on")
     
     def create_recording_stream(self, channels=2, rate=48000, period_size=None) -> bool:
         """Create a recording stream"""
